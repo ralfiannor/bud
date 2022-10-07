@@ -11,6 +11,7 @@ import (
 	"github.com/livebud/bud/internal/is"
 	"github.com/livebud/bud/package/budfs/treefs"
 	"github.com/livebud/bud/package/vfs"
+	"github.com/livebud/bud/package/virtual"
 )
 
 func TestFileSync(t *testing.T) {
@@ -179,13 +180,26 @@ func TestNoDuo(t *testing.T) {
 
 func TestSkipNotExist(t *testing.T) {
 	is := is.New(t)
-	// before := time.Date(2021, 8, 4, 14, 56, 0, 0, time.UTC)
-	after := time.Date(2021, 8, 4, 14, 57, 0, 0, time.UTC)
-	vfs.Now = func() time.Time { return after }
 
 	// starting points
 	sourceFS := treefs.New(".")
 	sourceFS.FileGenerator("bud/generate/main.go", treefs.Generate(func(target string) (fs.File, error) {
+		return nil, fs.ErrNotExist
+	}))
+	targetFS := vfs.Memory{}
+
+	// sync
+	err := dsync.To(sourceFS, targetFS, ".")
+	is.NoErr(err)
+	is.Equal(len(targetFS), 0)
+}
+
+func TestSkipDirNotExist(t *testing.T) {
+	is := is.New(t)
+
+	// starting points
+	sourceFS := treefs.New(".")
+	sourceFS.DirGenerator("bud/generate", treefs.Generate(func(target string) (fs.File, error) {
 		return nil, fs.ErrNotExist
 	}))
 	targetFS := vfs.Memory{}
@@ -324,4 +338,32 @@ func TestRel(t *testing.T) {
 	rel, err = dsync.Rel("bud", "app")("bud/a/a.go")
 	is.NoErr(err)
 	is.Equal(rel, "app/a/a.go")
+}
+
+func TestDeleteNotExist(t *testing.T) {
+	is := is.New(t)
+
+	// starting points
+	sourceFS := treefs.New(".")
+	notExist := false
+	sourceFS.FileGenerator("main.go", treefs.Generate(func(target string) (fs.File, error) {
+		if notExist {
+			return nil, fs.ErrNotExist
+		}
+		return virtual.New(&virtual.File{
+			Data: []byte("package main"),
+		}), nil
+	}))
+	targetFS := vfs.Memory{}
+
+	// sync
+	err := dsync.To(sourceFS, targetFS, ".")
+	is.NoErr(err)
+	is.Equal(len(targetFS), 1)
+
+	// set not exist and sync again
+	notExist = true
+	err = dsync.To(sourceFS, targetFS, ".")
+	is.NoErr(err)
+	is.Equal(len(targetFS), 0)
 }

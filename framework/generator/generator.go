@@ -3,7 +3,6 @@ package generator
 import (
 	_ "embed"
 	"fmt"
-	"io/fs"
 
 	"github.com/livebud/bud/framework"
 	"github.com/livebud/bud/internal/gobuild"
@@ -27,11 +26,12 @@ func Generate(state *State) ([]byte, error) {
 	return generator.Generate(state)
 }
 
-func New(flag *framework.Flag, injector *di.Injector, log log.Interface, module *gomod.Module, parser *parser.Parser) *Generator {
-	return &Generator{flag, injector, log, module, parser, nil}
+func New(bfs *budfs.FileSystem, flag *framework.Flag, injector *di.Injector, log log.Interface, module *gomod.Module, parser *parser.Parser) *Generator {
+	return &Generator{bfs, flag, injector, log, module, parser, nil}
 }
 
 type Generator struct {
+	bfs      *budfs.FileSystem
 	flag     *framework.Flag
 	injector *di.Injector
 	log      log.Interface
@@ -42,33 +42,34 @@ type Generator struct {
 	process *remotefs.Process
 }
 
-// GenerateDir connects to the remotefs and mounts the remote directory.
-func (g *Generator) GenerateDir(fsys budfs.FS, dir *budfs.Dir) error {
+// GenerateFile connects to the remotefs and mounts the remote directory.
+func (g *Generator) GenerateFile(fsys budfs.FS, file *budfs.File) error {
 	g.log.Debug("framework/generator: generating the main.go service containing the generators")
-	state, err := Load(fsys, g.injector, g.module, g.parser)
+	state, err := Load(fsys, g.injector, g.log, g.module, g.parser)
 	if err != nil {
-		return err
+		return fmt.Errorf("framework/generator: unable to load. %w", err)
 	}
 	code, err := Generate(state)
 	if err != nil {
 		return err
 	}
+	file.Data = code
 
-	g.log.Debug("framework/generator: write the generator main.go file to bud/tmp/generate/main.go")
-	if err := g.module.MkdirAll("bud/tmp/generate", 0755); err != nil {
+	g.log.Debug("framework/generator: write the generator main.go file to bud/command/.generate/main.go")
+	if err := g.module.MkdirAll("bud/command/.generate", 0755); err != nil {
 		return err
 	}
-	if err := g.module.WriteFile("bud/tmp/generate/main.go", []byte(code), 0644); err != nil {
+	if err := g.module.WriteFile("bud/command/.generate/main.go", []byte(code), 0644); err != nil {
 		return err
 	}
 
-	g.log.Debug("framework/generator: build the main.go file to bud/tmp/generate/main")
+	g.log.Debug("framework/generator: build the main.go file to bud/.generate")
 	builder := gobuild.New(g.module)
 	builder.Env = append([]string{}, g.flag.Env...)
 	builder.Stderr = g.flag.Stderr
 	builder.Stdout = g.flag.Stdout
-	if err := builder.Build(fsys.Context(), "bud/tmp/generate/main.go", "bud/tmp/generate/main"); err != nil {
-		return fmt.Errorf("framework/generator: unable to build 'bud/tmp/generate/main'. %s", err)
+	if err := builder.Build(fsys.Context(), "bud/command/.generate/main.go", "bud/.generate"); err != nil {
+		return fmt.Errorf("framework/generator: unable to build 'bud/.generate'. %s", err)
 	}
 
 	if g.process != nil {
@@ -79,14 +80,14 @@ func (g *Generator) GenerateDir(fsys budfs.FS, dir *budfs.Dir) error {
 		g.process = nil
 	}
 
-	g.log.Debug("framework/generator: start bud/tmp/generate/main that will serve the remote filesystem")
+	g.log.Debug("framework/generator: start bud/.generate that will serve the remote filesystem")
 	cmd := &remotefs.Command{
 		Dir:    g.module.Directory(),
 		Env:    append([]string{}, g.flag.Env...),
 		Stderr: g.flag.Stderr,
 		Stdout: g.flag.Stdout,
 	}
-	g.process, err = cmd.Start(fsys.Context(), g.module.Directory("bud/tmp/generate/main"))
+	g.process, err = cmd.Start(fsys.Context(), g.module.Directory("bud/.generate"))
 	if err != nil {
 		return err
 	}
@@ -99,11 +100,10 @@ func (g *Generator) GenerateDir(fsys budfs.FS, dir *budfs.Dir) error {
 		g.log.Debug("framework/generator: shutting down the remotefs")
 		return g.process.Close()
 	})
-	// Avoid mounting the whole directory which includes go.mod and the bud dir.
-	subfs, err := fs.Sub(g.process, "bud/internal/generator")
-	if err != nil {
-		return err
-	}
-	g.log.Debug("framework/generator: mounting the running remote filesystem at bud/internal/generator")
-	return dir.Mount(subfs)
+
+	// Mount the remote filesystem
+	g.log.Debug("framework/generator: mounting the running remote filesystem")
+	g.bfs.Mount(g.process)
+
+	return nil
 }

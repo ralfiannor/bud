@@ -3,15 +3,19 @@ package web
 import (
 	"io/fs"
 	"path"
+	"path/filepath"
 	"strings"
 
 	"github.com/livebud/bud/internal/scan"
+	"github.com/livebud/bud/internal/valid"
 
 	"github.com/livebud/bud/internal/bail"
 	"github.com/livebud/bud/internal/imports"
+	"github.com/livebud/bud/package/finder"
 	"github.com/livebud/bud/package/gomod"
 	"github.com/livebud/bud/package/parser"
 	"github.com/livebud/bud/package/vfs"
+	"github.com/matthewmueller/gotext"
 	"github.com/matthewmueller/text"
 )
 
@@ -39,13 +43,23 @@ func (l *loader) Load() (state *State, err error) {
 	state = new(State)
 	// Ensure the web files exist
 	exist, err := vfs.SomeExist(l.fsys,
-		"bud/internal/app/controller/controller.go",
-		"bud/internal/app/public/public.go",
-		"bud/internal/app/view/view.go",
+		"bud/internal/web/controller/controller.go",
+		"bud/internal/web/public/public.go",
+		"bud/internal/web/view/view.go",
 	)
 	if err != nil {
 		return nil, err
 	}
+	webDirs, err := finder.Find(l.fsys, "bud/internal/web/*/**.go", func(path string, isDir bool) (entries []string) {
+		if !isDir && valid.GoFile(path) {
+			entries = append(entries, filepath.Dir(path))
+		}
+		return entries
+	})
+	if err != nil {
+		return nil, err
+	}
+	_ = webDirs
 	// Add initial imports
 	l.imports.AddStd("net/http", "context")
 	l.imports.AddNamed("middleware", "github.com/livebud/bud/package/middleware")
@@ -59,25 +73,36 @@ func (l *loader) Load() (state *State, err error) {
 		return state, nil
 	}
 	// Turn on parts of the web server, based on what's generated
-	if exist["bud/internal/app/public/public.go"] {
-		state.HasPublic = true
-		l.imports.AddNamed("public", l.module.Import("bud/internal/app/public"))
+	if exist["bud/internal/web/public/public.go"] {
+		state.Resources = append(state.Resources, l.loadResource("bud/internal/web/public"))
 	}
-	if exist["bud/internal/app/view/view.go"] {
+	if exist["bud/internal/web/view/view.go"] {
 		state.HasView = true
-		l.imports.AddNamed("view", l.module.Import("bud/internal/app/view"))
+		l.imports.AddNamed("view", l.module.Import("bud/internal/web/view"))
 	}
 	// Load the controllers
-	if exist["bud/internal/app/controller/controller.go"] {
+	if exist["bud/internal/web/controller/controller.go"] {
 		state.Actions = l.loadControllerActions()
 		if len(state.Actions) > 0 {
-			l.imports.AddNamed("controller", l.module.Import("bud/internal/app/controller"))
+			l.imports.AddNamed("controller", l.module.Import("bud/internal/web/controller"))
 		}
 	}
 	// state.Command = l.loadRoot("command")
 	// Load the imports
 	state.Imports = l.imports.List()
 	return state, nil
+}
+
+func (l *loader) loadResource(webDir string) (resource *Resource) {
+	resource = new(Resource)
+	importPath := l.module.Import(webDir)
+	resource.Import = &imports.Import{
+		Name: l.imports.Add(importPath),
+		Path: importPath,
+	}
+	packageName := path.Base(webDir)
+	resource.Camel = gotext.Camel(packageName)
+	return resource
 }
 
 func (l *loader) loadControllerActions() (actions []*Action) {

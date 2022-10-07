@@ -13,7 +13,7 @@ import (
 )
 
 func Load(fsys fs.FS, injector *di.Injector, module *gomod.Module, flag *framework.Flag) (*State, error) {
-	if err := vfs.Exist(fsys, "bud/internal/app/web/web.go"); err != nil {
+	if err := vfs.Exist(fsys, "bud/internal/web/web.go"); err != nil {
 		return nil, err
 	}
 	return (&loader{
@@ -44,7 +44,7 @@ func (l *loader) Load() (state *State, err error) {
 	l.imports.AddNamed("console", "github.com/livebud/bud/package/log/console")
 	l.imports.AddNamed("log", "github.com/livebud/bud/package/log")
 	l.imports.AddNamed("filter", "github.com/livebud/bud/package/log/filter")
-	l.imports.Add(l.module.Import("bud/internal/app/web"))
+	l.imports.Add(l.module.Import("bud/internal/web"))
 	state.Provider = l.loadProvider()
 	state.Flag = l.flag
 	state.Imports = l.imports.List()
@@ -54,7 +54,7 @@ func (l *loader) Load() (state *State, err error) {
 func (l *loader) loadProvider() *di.Provider {
 	jsVM := di.ToType("github.com/livebud/bud/package/js", "VM")
 	// TODO: the public generator should be able to configure this
-	publicServer := di.ToType("github.com/livebud/bud/framework/public/publicrt", "Server")
+	publicFS := di.ToType("github.com/livebud/bud/framework/public/publicrt", "FS")
 	fn := &di.Function{
 		Name:    "loadWeb",
 		Imports: l.imports,
@@ -66,16 +66,17 @@ func (l *loader) loadProvider() *di.Provider {
 			{Import: "context", Type: "Context"},
 		},
 		Results: []di.Dependency{
-			di.ToType(l.module.Import("bud/internal/app/web"), "*Server"),
+			di.ToType(l.module.Import("bud/internal/web"), "*Server"),
 			&di.Error{},
 		},
 		Aliases: di.Aliases{
-			publicServer: di.ToType("github.com/livebud/bud/framework/public/publicrt", "*LiveServer"),
+			publicFS: di.ToType("github.com/livebud/bud/package/budhttp", "Client"),
+			jsVM:     di.ToType("github.com/livebud/bud/package/budhttp", "Client"),
 		},
 	}
 	if l.flag.Embed {
 		fn.Aliases[jsVM] = di.ToType("github.com/livebud/bud/package/js/v8", "*VM")
-		fn.Aliases[publicServer] = di.ToType("github.com/livebud/bud/framework/public/publicrt", "*StaticServer")
+		fn.Aliases[publicFS] = di.ToType(l.module.Import("bud/internal/web/public"), "FS")
 	}
 	provider, err := l.injector.Wire(fn)
 	if err != nil {

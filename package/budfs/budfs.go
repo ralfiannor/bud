@@ -83,7 +83,7 @@ type FS interface {
 	fs.FS
 	fs.ReadDirFS
 	fs.GlobFS
-	Link(to string)
+	Watch(paths ...string) error
 	Context() context.Context
 	Defer(func() error)
 }
@@ -126,6 +126,15 @@ func (d *Dir) GenerateDir(dir string, fn func(fsys FS, dir *Dir) error) {
 
 func (d *Dir) DirGenerator(dir string, generator DirGenerator) {
 	d.GenerateDir(dir, generator.GenerateDir)
+}
+
+func (d *Dir) ServeFile(dir string, fn func(fsys FS, file *File) error) {
+	fileg := &fileServer{d.fsys, fn, nil, dir}
+	fileg.node = d.node.DirGenerator(dir, fileg)
+}
+
+func (d *Dir) FileServer(dir string, generator FileGenerator) {
+	d.ServeFile(dir, generator.GenerateFile)
 }
 
 type mountGenerator struct {
@@ -197,6 +206,10 @@ func (f *FileSystem) Open(name string) (fs.File, error) {
 
 func (f *FileSystem) Close() error {
 	return f.closer.Close()
+}
+
+func (f *FileSystem) Dir() *Dir {
+	return &Dir{fsys: f, node: f.node, target: "."}
 }
 
 type fileGenerator struct {
@@ -280,13 +293,13 @@ func (g *fileServer) Generate(target string) (fs.File, error) {
 	if entry, ok := g.fsys.cache.Get(target); ok {
 		return virtual.New(entry), nil
 	}
+	// Always return an empty directory if we request the root
 	rel := relativePath(g.node.Path(), target)
 	if rel == "." {
-		return nil, &fs.PathError{
-			Op:   "open",
-			Path: g.node.Path(),
-			Err:  fs.ErrNotExist,
-		}
+		return virtual.New(&virtual.Dir{
+			Path: g.path,
+			Mode: fs.ModeDir,
+		}), nil
 	}
 	fctx := &fileSystem{context.TODO(), g.fsys, g.fsys.lmap.Scope(target)}
 	// File differs slightly than others because g.node.Path() is the directory
@@ -343,12 +356,12 @@ func (f *FileSystem) Mount(fsys fs.FS) {
 }
 
 // Sync the overlay to the filesystem
-func (f *FileSystem) Sync(writable virtual.FS, to string) error {
+func (f *FileSystem) Sync(writable virtual.FS, to string, options ...dsync.Option) error {
 	// Temporarily replace the underlying fs.FS with a cached fs.FS
 	cache := vcache.New()
 	fsys := f.fsys
 	f.fsys = vcache.Wrap(cache, fsys, f.log)
-	err := dsync.To(f.fsys, writable, to)
+	err := dsync.To(f.fsys, writable, to, options...)
 	f.fsys = fsys
 	return err
 }
@@ -380,16 +393,33 @@ var _ FS = (*fileSystem)(nil)
 
 // Open implements fs.FS
 func (f *fileSystem) Open(name string) (fs.File, error) {
+	f.link.Link("open", name)
 	file, err := f.fsys.Open(name)
 	if err != nil {
 		return nil, err
 	}
-	f.link.Link("open", name)
 	return file, nil
 }
 
-func (f *fileSystem) Link(to string) {
-	f.link.Link("link", to)
+// Watch the paths for changes
+func (f *fileSystem) Watch(paths ...string) error {
+	for _, path := range paths {
+		// Not a glob
+		if glob.Base(path) == path {
+			f.link.Link("watch", path)
+			continue
+		}
+		// Compile the pattern into a glob matcher
+		matcher, err := glob.Compile(path)
+		if err != nil {
+			return err
+		}
+		// Watch for changes to the pattern
+		f.link.Select("watch", func(path string) bool {
+			return matcher.Match(path)
+		})
+	}
+	return nil
 }
 
 func (f *fileSystem) Context() context.Context {
@@ -435,13 +465,13 @@ func (f *fileSystem) Glob(pattern string) (matches []string, err error) {
 
 // ReadDir implements fs.ReadDirFS
 func (f *fileSystem) ReadDir(name string) ([]fs.DirEntry, error) {
+	f.link.Select("readdir", func(path string) bool {
+		return path == name || filepath.Dir(path) == name
+	})
 	des, err := fs.ReadDir(f.fsys, name)
 	if err != nil {
 		return nil, err
 	}
-	f.link.Select("readdir", func(path string) bool {
-		return path == name || filepath.Dir(path) == name
-	})
 	return des, nil
 }
 
